@@ -19,7 +19,6 @@ FPS = 30
 BLOCK_ALPHABET = [
     '▀','▁','▂','▃','▄','▅','▆','▇','█','▉','▊','▋','▌','▍','▎','▏','▐','░','▒','▔','▕','▙','▚','▛','▜','▟'
 ]
-# 's' for ending (as per user request)
 BLOCK_S = 's'
 
 logging.basicConfig(
@@ -104,18 +103,16 @@ def generate_video():
         return None
 
 def random_block6():
-    # 5 random from the block alphabet, end with 's'
     chars = random.choices(BLOCK_ALPHABET, k=5)
     chars.append(BLOCK_S)
     return ''.join(chars)
 
 def main():
-    i = 0
     while True:
         try:
             video_path = generate_video()
             if not video_path or not os.path.exists(video_path):
-                logging.error(f"Video generation failed at index {i}")
+                logging.error("Video generation failed.")
                 time.sleep(60)
                 continue
             title = random_block6()
@@ -126,9 +123,8 @@ def main():
             except Exception as e:
                 logging.warning(f"Error removing video file {video_path}: {e}")
         except Exception as e:
-            logging.error(f"Unexpected error in main loop at index {i}: {e}")
-        i += 1
-        time.sleep(60)
+            logging.error(f"Unexpected error in main loop: {e}")
+        time.sleep(60)  # Wait 1 minute
 
 if __name__ == "__main__":
     main()
