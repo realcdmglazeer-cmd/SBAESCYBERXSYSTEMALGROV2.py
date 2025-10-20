@@ -110,7 +110,7 @@ def upload_to_youtube(video_file, title, description, youtube=None, credentials=
             categoryId='22'
         ),
         status=dict(
-            privacyStatus="unlisted"
+            privacyStatus="public"
         )
     )
 
@@ -146,7 +146,7 @@ def main():
         try:
             youtube, credentials = upload_to_youtube(filename, title, description, youtube, credentials)
         except Exception as e:
-            print("YouTube upload failed:", e)
+            print("yt_test_upload-partner = sbaes Failed within error:", e)
             # Optionally: retry logic or break
         finally:
             if os.path.exists(filename):
