@@ -1,130 +1,160 @@
-import os
+import moviepy
+import numpy as np
 import random
+import os
 import time
-import logging
-from moviepy.editor import ColorClip, concatenate_videoclips, AudioFileClip
-from pydub import AudioSegment
-from pydub.generators import Sine
+import datetime
 
-# ============ USER CONFIGURATION ============
-YOUTUBE_CLIENT_SECRETS = "client_secrets.json"      # replace with your actual client secrets file path
-YOUTUBE_CREDENTIALS = "youtube_credentials.json"    # replace with your actual credentials file path
-RESOLUTION = (1280, 720)
-VIDEO_DURATION = 25
-FIRST_PHASE_DURATION = 16
-SECOND_PHASE_DURATION = 9
-FPS = 30
+import google_auth_oauthlib.flow
+import googleapiclient.discovery
+import googleapiclient.errors
 
-# Block/shade unicode alphabet a-z, 's' is the last character in the set
-BLOCK_ALPHABET = [
-    '▀','▁','▂','▃','▄','▅','▆','▇','█','▉','▊','▋','▌','▍','▎','▏','▐','░','▒','▔','▕','▙','▚','▛','▜','▟'
+BLOCKS = [
+    "▀", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█", "▉", "▊", "▋", "▌", "▍", "▎",
+    "▏", "▐", "░", "▒", "▔", "▕", "▙", "▚", "▛", "▜", "▟"
 ]
-BLOCK_S = 's'
+ORTHODOX_CROSS = "☦"
 
-logging.basicConfig(
-    filename='video_uploader.log',
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s:%(message)s'
-)
+DURATION = 16
+PIXEL_INTERVAL = 0.5
+FLASH_DURATION = 4
+FLASH_INTERVAL = 0.2
+N_PIXELS = 341
+VIDEO_SIZE = (1280, 720)
 
-def upload_to_youtube(video_path, title, description):
-    try:
-        command = (
-            f'youtube-upload '
-            f'--client-secrets="{YOUTUBE_CLIENT_SECRETS}" '
-            f'--credentials-file="{YOUTUBE_CREDENTIALS}" '
-            f'--title="{title}" '
-            f'--description="{description}" '
-            f'"{video_path}"'
-        )
-        result = os.system(command)
-        if result != 0:
-            logging.error(f"Upload failed for {video_path}")
-        else:
-            logging.info(f"Uploaded {video_path} successfully")
-    except Exception as e:
-        logging.error(f"Error uploading to YouTube: {e}")
+def random_title(n_blocks=6):
+    blocks = [random.choice(BLOCKS) for _ in range(n_blocks)]
+    return ORTHODOX_CROSS + ''.join(blocks)
 
 def random_color():
-    return tuple(random.randint(0,255) for _ in range(3))
+    return tuple(random.randint(0, 255) for _ in range(3))
 
-def generate_beep(frequency, duration):
-    try:
-        return Sine(frequency).to_audio_segment(duration=duration*1000)
-    except Exception as e:
-        logging.error(f"Error generating beep: {e}")
-        return AudioSegment.silent(duration=duration*1000)
+def pixel_positions(n, size):
+    positions = set()
+    while len(positions) < n:
+        positions.add((random.randint(0, size[0]-1), random.randint(0, size[1]-1)))
+    return list(positions)
 
-def generate_audio():
-    try:
-        audio = AudioSegment.silent(duration=VIDEO_DURATION*1000)
-        for start in range(0, FIRST_PHASE_DURATION):
-            freq = random.randint(521, 2483)
-            beep = generate_beep(freq, 1)
-            audio = audio.overlay(beep, position=start*1000)
-        t = FIRST_PHASE_DURATION
-        while t < VIDEO_DURATION:
-            freq = random.randint(521, 2483)
-            beep = generate_beep(freq, 0.3)
-            audio = audio.overlay(beep, position=int(t*1000))
-            t += 0.3
-        audio.export("temp_audio.wav", format="wav")
-        return "temp_audio.wav"
-    except Exception as e:
-        logging.error(f"Error generating audio: {e}")
-        return None
+def make_frame_factory(pixels, pixel_colors, bg_color):
+    def make_frame(t):
+        img = np.zeros((VIDEO_SIZE[1], VIDEO_SIZE[0], 3), dtype=np.uint8)
+        img[:,:] = bg_color
+        if t < DURATION:
+            idx = int(t // PIXEL_INTERVAL)
+            for i in range(min(idx+1, N_PIXELS)):
+                x, y = pixels[i]
+                img[y, x] = pixel_colors[i]
+        else:
+            if (int(((t-DURATION)/FLASH_INTERVAL)) % 2) == 0:
+                img[:,:] = random_color()
+        return img
+    return make_frame
 
-def generate_video():
-    try:
-        color1 = random_color()
-        clip1 = ColorClip(size=RESOLUTION, color=color1, duration=FIRST_PHASE_DURATION)
-        clips = []
-        for i in range(SECOND_PHASE_DURATION * FPS):
-            color = random_color()
-            clips.append(ColorClip(size=RESOLUTION, color=color, duration=1/FPS))
-        clip2 = concatenate_videoclips(clips)
-        final_clip = concatenate_videoclips([clip1, clip2])
-        audio_path = generate_audio()
-        if not audio_path or not os.path.exists(audio_path):
-            logging.error("Audio file not generated, skipping this video.")
-            return None
-        final_clip = final_clip.set_audio(AudioFileClip(audio_path))
-        outname = f"video_{random.randint(100000,999999)}.mp4"
-        final_clip.write_videofile(outname, fps=FPS, codec="libx264", audio_codec="aac", verbose=False, logger=None)
-        os.remove(audio_path)
-        return outname
-    except Exception as e:
-        logging.error(f"Error generating video: {e}")
-        if os.path.exists("temp_audio.wav"):
-            try:
-                os.remove("temp_audio.wav")
-            except Exception as rm_e:
-                logging.warning(f"Error removing temp audio: {rm_e}")
-        return None
+def make_audio(duration, pixels, pixel_colors, bg_color):
+    fps = 48000
+    total_samples = int(fps * (duration))
+    audio = np.zeros(total_samples)
+    t = 0.0
+    while t < duration:
+        if t < DURATION:
+            idx = int(t // PIXEL_INTERVAL)
+            if idx < N_PIXELS:
+                if (t % PIXEL_INTERVAL) < 0.5:
+                    freq = random.randint(1400, 3189)
+                    samples = int(fps * 0.5)
+                    start = int(t * fps)
+                    end = min(start + samples, total_samples)
+                    beep = 0.2 * np.sin(2 * np.pi * freq * np.linspace(0, 0.5, end-start))
+                    audio[start:end] = beep
+            t += PIXEL_INTERVAL
+        else:
+            if ((t - DURATION) % FLASH_INTERVAL) < 0.2:
+                freq = random.randint(1400, 3189)
+                samples = int(fps * 0.2)
+                start = int(t * fps)
+                end = min(start + samples, total_samples)
+                beep = 0.2 * np.sin(2 * np.pi * freq * np.linspace(0, 0.2, end-start))
+                audio[start:end] = beep
+            t += FLASH_INTERVAL
+    audio_stereo = np.vstack([audio, audio])
+    return moviepy.audio.AudioClip.AudioArrayClip(audio_stereo, fps=fps)
 
-def random_block6():
-    chars = random.choices(BLOCK_ALPHABET, k=5)
-    chars.append(BLOCK_S)
-    return ''.join(chars)
+def generate_video(filename, duration):
+    pixels = pixel_positions(N_PIXELS, VIDEO_SIZE)
+    pixel_colors = [random_color() for _ in range(N_PIXELS)]
+    bg_color = random_color()
+    video = moviepy.editor.VideoClip(make_frame_factory(pixels, pixel_colors, bg_color), duration=duration)
+    audio = make_audio(duration, pixels, pixel_colors, bg_color)
+    video = video.set_audio(audio)
+    video.write_videofile(filename, fps=24, logger=None)
+
+def upload_to_youtube(video_file, title, description, youtube=None, credentials=None):
+    scopes = ["https://www.googleapis.com/auth/youtube.upload"]
+    api_service_name = "youtube"
+    api_version = "v3"
+    client_secrets_file = "client_secrets.json"
+
+    if youtube is None or credentials is None:
+        # Get credentials and create an API client
+        flow = google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file(
+            client_secrets_file, scopes)
+        credentials = flow.run_console()
+        youtube = googleapiclient.discovery.build(
+            api_service_name, api_version, credentials=credentials)
+
+    body=dict(
+        snippet=dict(
+            title=title,
+            description=description,
+            tags=[],
+            categoryId='22'
+        ),
+        status=dict(
+            privacyStatus="unlisted"
+        )
+    )
+
+    request = youtube.videos().insert(
+        part="snippet,status",
+        body=body,
+        media_body=video_file
+    )
+    response = request.execute()
+    print(f"Uploaded video ID: {response.get('id')}")
+    return youtube, credentials
 
 def main():
-    while True:
+    duration = DURATION + FLASH_DURATION
+    total_videos = 1440  # 1 per minute for 24h
+    seconds_between = 60
+
+    youtube = None
+    credentials = None
+
+    for i in range(total_videos):
+        start_time = time.time()
+        now = datetime.datetime.now().isoformat()
+        print(f"\n[{now}] Starting video {i + 1} of {total_videos}")
+
+        title = random_title()
+        description = title
+        filename = f"pixel_cross_video_{i+1}.mp4"
+        generate_video(filename, duration)
+        print(f"[{now}] Generated video: {filename}")
+
+        # Upload
         try:
-            video_path = generate_video()
-            if not video_path or not os.path.exists(video_path):
-                logging.error("Video generation failed.")
-                time.sleep(60)
-                continue
-            title = random_block6()
-            description = random_block6()
-            upload_to_youtube(video_path, title, description)
-            try:
-                os.remove(video_path)
-            except Exception as e:
-                logging.warning(f"Error removing video file {video_path}: {e}")
+            youtube, credentials = upload_to_youtube(filename, title, description, youtube, credentials)
         except Exception as e:
-            logging.error(f"Unexpected error in main loop: {e}")
-        time.sleep(60)  # Wait 1 minute
+            print("YouTube upload failed:", e)
+            # Optionally: retry logic or break
+        finally:
+            if os.path.exists(filename):
+                os.remove(filename)
+
+        elapsed = time.time() - start_time
+        if elapsed < seconds_between:
+            time.sleep(seconds_between - elapsed)
 
 if __name__ == "__main__":
     main()
